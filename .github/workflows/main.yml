@@ -1,1 +1,32 @@
+name: Build Meizhu iOS App (TrollStore ipa)
 
+# 云端自动编译：push 后到 Actions 页面下载编译好的 ipa
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 查看环境
+        run: |
+          xcodebuild -version || true
+          xcrun --sdk iphoneos --show-sdk-path
+          clang --version | head -2
+
+      - name: 编译并打包 ipa
+        run: |
+          chmod +x build.sh
+          ./build.sh
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: 美筑智管-ipa
+          path: 美筑智管.ipa
+          if-no-files-found: error
