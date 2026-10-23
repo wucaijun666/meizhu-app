@@ -1,9 +1,10 @@
 // 美筑智管 iOS 壳 —— 把单文件网页包成原生 App（WKWebView）
 // 目标：iPhone 15 Pro / iOS 17.0 / TrollStore 安装
+// v2.1：新增 JS 桥（导出文件直接写入「文件」App），修复 blob 下载在 WKWebView 不落地的问题
 #import <UIKit/UIKit.h>
 #import <WebKit/WebKit.h>
 
-@interface AppDelegate : UIResponder <UIApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate>
+@interface AppDelegate : UIResponder <UIApplicationDelegate, WKNavigationDelegate, WKDownloadDelegate, WKScriptMessageHandler>
 @property (strong, nonatomic) UIWindow *window;
 @property (strong, nonatomic) WKWebView *webView;
 @end
@@ -18,6 +19,10 @@
     if (@available(iOS 14.0, *)) {
         cfg.defaultWebpagePreferences.allowsContentJavaScript = YES;
     }
+    // JS 桥：网页可通过 window.webkit.messageHandlers.meizhu 调用原生保存
+    WKUserContentController *ucc = [[WKUserContentController alloc] init];
+    [ucc addScriptMessageHandler:self name:@"meizhu"];
+    cfg.userContentController = ucc;
     // 让 localStorage 持久可用（file:// 下需要非临时数据存储）
     if (@available(iOS 17.0, *)) {
         cfg.websiteDataStore = [WKWebsiteDataStore defaultDataStore];
@@ -29,7 +34,6 @@
     self.webView.opaque = NO;
     self.webView.backgroundColor = [UIColor colorWithRed:15/255.0 green:22/255.0 blue:38/255.0 alpha:1.0];
     self.webView.scrollView.backgroundColor = self.webView.backgroundColor;
-    // 自动避开状态栏/刘海（保持默认 automatic）
 
     UIViewController *vc = [UIViewController new];
     vc.view = self.webView;
@@ -46,7 +50,43 @@
 
 - (void)applicationDidBecomeActive:(UIApplication *)application {}
 
-#pragma mark - 下载（导出 Excel / CSV 时保存到「文件」App）
+#pragma mark - JS 桥：接收网页发来的文件（导出 Excel/CSV → 写入「文件」App）
+
+- (NSString *)jsQuote:(NSString *)s {
+    NSString *e = [s stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    e = [e stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+    e = [e stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+    e = [e stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+    return [NSString stringWithFormat:@"'%@'", e];
+}
+
+- (void)userContentController:(WKUserContentController *)userContentController didReceiveScriptMessage:(WKScriptMessage *)message {
+    if (![message.name isEqualToString:@"meizhu"]) return;
+    NSDictionary *body = message.body;
+    if (![body isKindOfClass:[NSDictionary class]]) return;
+    NSString *action = [body[@"action"] isKindOfClass:[NSString class]] ? body[@"action"] : @"";
+    if (![action isEqualToString:@"saveFile"]) return;
+
+    NSString *name = [body[@"name"] isKindOfClass:[NSString class]] ? body[@"name"] : @"导出文件.xlsx";
+    if (name.length == 0) name = @"导出文件.xlsx";
+    name = [name stringByReplacingOccurrencesOfString:@"/" withString:@"_"];
+    name = [name stringByReplacingOccurrencesOfString:@":" withString:@"_"];
+
+    NSString *b64 = [body[@"data"] isKindOfClass:[NSString class]] ? body[@"data"] : @"";
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:b64 options:NSDataBase64DecodingIgnoreUnknownCharacters];
+
+    NSURL *docs = [[[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask] firstObject];
+    NSURL *dest = [docs URLByAppendingPathComponent:name];
+    [[NSFileManager defaultManager] removeItemAtURL:dest error:nil];
+    BOOL ok = (data.length > 0) && [data writeToURL:dest atomically:YES];
+
+    NSString *js = [NSString stringWithFormat:@"window.__onNativeSave && window.__onNativeSave(%@, %@);", ok ? @"true" : @"false", [self jsQuote:name]];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self.webView evaluateJavaScript:js completionHandler:nil];
+    });
+}
+
+#pragma mark - 下载（兼容 http(s) 下载；blob 下载由上面的 JS 桥处理）
 
 - (void)webView:(WKWebView *)webView decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
     if (navigationAction.shouldPerformDownload) {
@@ -74,7 +114,7 @@
 - (void)downloadDidFinish:(WKDownload *)download API_AVAILABLE(ios(14.5)) {
     dispatch_async(dispatch_get_main_queue(), ^{
         UIAlertController *ac = [UIAlertController alertControllerWithTitle:@"导出完成"
-            message:@"文件已保存到「文件」App → 我的 iPhone/iCloud 云盘 → 美筑智管"
+            message:@"文件已保存到「文件」App → 我的 iPhone → 美筑智管"
             preferredStyle:UIAlertControllerStyleAlert];
         [ac addAction:[UIAlertAction actionWithTitle:@"好的" style:UIAlertActionStyleDefault handler:nil]];
         [self.window.rootViewController presentViewController:ac animated:YES completion:nil];
